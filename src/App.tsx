@@ -296,106 +296,75 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  // --- SOLVER DE RESTRICCIONES (DÍA A DÍA - REGLAS 1 Y 2) ---
+  // --- MEJORA EN EL SOLVER (Para evitar celdas vacías) ---
+  // Busca esta parte dentro de applyConstraintSolver y asegúrate que esté así:
   const applyConstraintSolver = async (preferencesData: any, isAI: boolean) => {
-    setStatusMsg("Resolviendo conflictos y solapamientos...");
-    const turnosMap: Record<string, any> = {};
-    turnosDB.forEach(t => turnosMap[t.cod_turno] = t);
+  setStatusMsg("Resolviendo conflictos y solapamientos...");
+  const turnosMap: Record<string, any> = {};
+  turnosDB.forEach(t => turnosMap[t.cod_turno] = t);
 
-    const newPlan: any[] =[];
-    const modifiedSet = new Set(planificacionDB.filter(p => p.modificado_manualmente).map(p => `${p.unidad}_${p.fecha}_${p.is_tm}`));
+  const newPlan: any[] =[];
+  const modifiedSet = new Set(planificacionDB.filter(p => p.modificado_manualmente).map(p => `${p.unidad}_${p.fecha}_${p.is_tm}`));
 
-    for (const day of selectedDays) {
-      const d = new Date(selectedYear, selectedMonth, day);
-      const tipoDia = getTipoDia(d, feriadosSet);
-      const fechaStr = formatYMD(d);
-      
-      const usedShiftsToday = new Set<string>();
-      
-      planificacionDB.forEach(p => {
-        if (p.fecha === fechaStr && p.modificado_manualmente && p.turno_actual) {
-          usedShiftsToday.add(p.turno_actual);
-        }
-      });
+  for (const day of selectedDays) {
+    const d = new Date(selectedYear, selectedMonth, day);
+    const tipoDia = getTipoDia(d, feriadosSet);
+    const fechaStr = formatYMD(d);
+    const usedShiftsToday = new Set<string>();
 
-      let tmRequests: {unidad: string, options: {shift: string, prob: number}[]}[] =[];
-      let ttRequests: {unidad: string, options: {shift: string, prob: number}[]}[] =[];
+    // Bloquear turnos manuales ya existentes
+    planificacionDB.forEach(p => {
+      if (p.fecha === fechaStr && p.turno_actual) usedShiftsToday.add(p.turno_actual);
+    });
 
-      INITIAL_UNITS.forEach(unit => {
-        if (isAI) {
-          const tmOpt = preferencesData[unit.unidad]?.[`TM_${tipoDia}`] ||[];
-          const ttOpt = preferencesData[unit.unidad]?.[`TT_${tipoDia}`] ||[];
-          if (tmOpt.length > 0) tmRequests.push({ unidad: unit.unidad, options: tmOpt.map((s: string, i: number) => ({shift: s, prob: 3-i})) });
-          if (ttOpt.length > 0) ttRequests.push({ unidad: unit.unidad, options: ttOpt.map((s: string, i: number) => ({shift: s, prob: 3-i})) });
-        } else {
-          const targetTM = preferencesData[unit.unidad]?.['true']?.[tipoDia];
-          if (targetTM) {
-            let total = Object.values(targetTM).reduce((a: any, b: any) => a + b.count, 0) as number;
-            let opts = Object.entries<any>(targetTM).map(([shift, data]) => ({ shift, prob: data.count / total }));
-            opts.sort((a,b) => b.prob - a.prob);
-            tmRequests.push({ unidad: unit.unidad, options: opts });
+    let requests: any[] = [];
+    INITIAL_UNITS.forEach(unit => {
+      // Intentamos obtener el patrón del día (Domingo/Sábado/Semana)
+      // Si el día es Domingo/Feriado y no hay datos, intentamos 'Semana' como fallback
+      const getOptions = (franja: 'TM'|'TT') => {
+        let opts = isAI 
+          ? (preferencesData[unit.unidad]?.[`${franja}_${tipoDia}`] || preferencesData[unit.unidad]?.[`${franja}_Semana`] || [])
+          : (preferencesData[unit.unidad]?.[franja === 'TM' ? 'true' : 'false']?.[tipoDia] || preferencesData[unit.unidad]?.[franja === 'TM' ? 'true' : 'false']?.['Semana'] || []);
+        
+        return isAI ? opts.map((s:any, i:any) => ({shift: s, prob: 3-i})) : Object.entries<any>(opts).map(([s, data]) => ({shift: s, prob: data.count})).sort((a,b)=>b.prob-a.prob);
+      };
+
+      requests.push({ unidad: unit.unidad, is_tm: true, options: getOptions('TM') });
+      requests.push({ unidad: unit.unidad, is_tm: false, options: getOptions('TT') });
+    });
+
+    // Ordenar por prioridad (las unidades con opciones más claras van primero)
+    requests.sort((a,b) => (b.options[0]?.prob || 0) - (a.options[0]?.prob || 0));
+
+    const unidadFinTM: Record<string, number> = {};
+
+    requests.forEach(req => {
+      if (modifiedSet.has(`${req.unidad}_${fechaStr}_${req.is_tm}`)) return;
+
+      for (const opt of req.options) {
+        if (!usedShiftsToday.has(opt.shift)) {
+          const tInfo = turnosMap[opt.shift];
+          
+          // Regla 2: Solapamiento
+          if (!req.is_tm && unidadFinTM[req.unidad] && tInfo?.hora_inicio) {
+            if (unidadFinTM[req.unidad] + 10 > timeToMins(tInfo.hora_inicio)) continue;
           }
-          const targetTT = preferencesData[unit.unidad]?.['false']?.[tipoDia];
-          if (targetTT) {
-            let total = Object.values(targetTT).reduce((a: any, b: any) => a + b.count, 0) as number;
-            let opts = Object.entries<any>(targetTT).map(([shift, data]) => ({ shift, prob: data.count / total }));
-            opts.sort((a,b) => b.prob - a.prob);
-            ttRequests.push({ unidad: unit.unidad, options: opts });
-          }
+
+          newPlan.push({
+            unidad: req.unidad,
+            fecha: fechaStr,
+            is_tm: req.is_tm,
+            turno_proyectado: opt.shift,
+            turno_actual: opt.shift,
+            modificado_manualmente: false
+          });
+          usedShiftsToday.add(opt.shift);
+          if (req.is_tm && tInfo?.hora_fin) unidadFinTM[req.unidad] = timeToMins(tInfo.hora_fin);
+          break;
         }
-      });
-
-      tmRequests.sort((a,b) => b.options[0].prob - a.options[0].prob);
-      ttRequests.sort((a,b) => b.options[0].prob - a.options[0].prob);
-
-      const unidadTMFin: Record<string, number> = {};
-
-      tmRequests.forEach(req => {
-        if (modifiedSet.has(`${req.unidad}_${fechaStr}_true`)) return;
-        for (const opt of req.options) {
-          if (!usedShiftsToday.has(opt.shift)) {
-            usedShiftsToday.add(opt.shift);
-            newPlan.push({ unidad: req.unidad, fecha: fechaStr, is_tm: true, turno_proyectado: opt.shift, turno_actual: opt.shift, modificado_manualmente: false });
-            const turnoInfo = turnosMap[opt.shift];
-            if (turnoInfo?.hora_fin) unidadTMFin[req.unidad] = timeToMins(turnoInfo.hora_fin);
-            break;
-          }
-        }
-      });
-
-      ttRequests.forEach(req => {
-        if (modifiedSet.has(`${req.unidad}_${fechaStr}_false`)) return; 
-        for (const opt of req.options) {
-          if (!usedShiftsToday.has(opt.shift)) {
-            const turnoInfo = turnosMap[opt.shift];
-            let isValid = true;
-            if (turnoInfo?.hora_inicio && unidadTMFin[req.unidad]) {
-              const ttInicio = timeToMins(turnoInfo.hora_inicio);
-              // REGLA 2: HOLGURA 10 MINUTOS
-              if (unidadTMFin[req.unidad] + 10 > ttInicio) {
-                isValid = false; 
-              }
-            }
-            if (isValid) {
-              usedShiftsToday.add(opt.shift);
-              newPlan.push({ unidad: req.unidad, fecha: fechaStr, is_tm: false, turno_proyectado: opt.shift, turno_actual: opt.shift, modificado_manualmente: false });
-              break;
-            }
-          }
-        }
-      });
-    }
-
-    setStatusMsg("Guardando plan en Base de Datos...");
-    const chunkSize = 1000;
-    for (let i = 0; i < newPlan.length; i += chunkSize) {
-      await supabase.from('planificacion').upsert(newPlan.slice(i, i + chunkSize), { onConflict: 'unidad,fecha,is_tm' });
-    }
-
-    setStatusMsg("");
-    setIsLoading(false);
-    fetchPlanificacion();
-  };
+      }
+    });
+  }
 
   const generarProyeccionStats = async () => {
     if (selectedDays.length === 0) return alert("Selecciona al menos un día.");
@@ -459,16 +428,22 @@ export default function App() {
       counts[t.cod_turno] = (counts[t.cod_turno] || 0) + 1;
     });
 
+    // --- MEJORA EN EL PROMPT DE LA IA (Dentro de generarProyeccionIA) ---
     const prompt = `
-    Eres un planificador logístico. Analiza estas FRECUENCIAS de viajes de autobuses de los últimos 2 meses.
-    El formato es { "Unidad": { "Franja_TipoDia": { "CodTurno": VecesRepetido } } }.
-    
-    TAREA: Para cada unidad y franja, deduce el "TOP 3" de turnos con más probabilidad.
-    REGLA: Devuelve ÚNICAMENTE un JSON válido (sin markdown ni texto), así:
-    { "L540-001": { "TM_Semana":["5401", "5402", "5403"], "TT_Semana": ["5201"] } }
-    
-    DATOS DE FRECUENCIA:
-    ${JSON.stringify(resumenComprimido)}
+    Eres un planificador logístico experto. Analiza las frecuencias de turnos de estos autobuses.
+    DATOS: ${JSON.stringify(resumenComprimido)}
+
+    TAREA:
+    1. Para cada unidad, identifica los 3 turnos más probables para: TM_Semana, TT_Semana, TM_Sabado, TT_Sabado, TM_Domingo, TT_Domingo.
+    2. REGLA DE ORO: Si una unidad NO tiene datos para Sábado o Domingo, SUGIERE sus turnos más frecuentes de la semana (Semana -> Sábado/Domingo). ¡No dejes ninguna unidad sin opciones!
+    3. Devuelve ÚNICAMENTE un JSON puro (sin bloques de código markdown) con esta estructura:
+    { 
+      "UNIDAD": { 
+        "TM_Semana": ["T1", "T2", "T3"], 
+        "TM_Sabado": ["T1", "T2"], 
+        "TM_Domingo": ["T1"] 
+      } 
+    }
     `;
 
     try {
@@ -493,7 +468,7 @@ export default function App() {
       setIsLoading(false);
     }
   };
-  
+
   // Callback Memoizado para no redibujar el grid entero
   const updateCell = useCallback(async (unidad: string, fecha: string, is_tm: boolean, newVal: string) => {
     setPlanificacionDB(prev => {
