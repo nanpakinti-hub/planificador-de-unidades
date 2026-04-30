@@ -461,12 +461,18 @@ export default function App() {
 
     try {
       const response = await fetch("/api/mistral", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", 
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt })
       });
-      const result = await response.json();
       
-      if (result.error) throw new Error(result.error);
+      // Si el servidor responde con error (404, 500, etc)
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `Error del servidor: ${response.status}`);
+      }
+
+      const result = await response.json();
 
       let aiText = result.choices[0].message.content.trim();
       if (aiText.startsWith("```json")) aiText = aiText.replace(/```json/g, "").replace(/```/g, "");
@@ -474,8 +480,11 @@ export default function App() {
       const patronInteligente = JSON.parse(aiText);
       applyConstraintSolver(patronInteligente, true);
 
-    } catch (error) {
-      console.error(error); alert("Error en Mistral AI o backend no configurado."); setIsLoading(false);
+    } catch (error: any) {
+      console.error("DETALLE DEL ERROR:", error);
+      // ESTE ALERT NOS DIRÁ EL ERROR REAL
+      alert("FALLO TÉCNICO: " + error.message); 
+      setIsLoading(false);
     }
   };
 
