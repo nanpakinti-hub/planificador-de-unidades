@@ -1,19 +1,23 @@
 export default async function handler(req, res) {
-  // 1. Aceptar la petición solo si es POST
+  // Manejo de preflight para evitar bloqueos
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Método no permitido' });
   }
 
-  // 2. Extraer el prompt que nos envía React y la clave segura de Vercel
-  const { prompt } = req.body;
+  // IMPORTANTE: En Vercel se usa process.env, no import.meta.env
   const nvidiaKey = process.env.VITE_NVIDIA_API_KEY;
 
   if (!nvidiaKey) {
-    return res.status(500).json({ error: 'Falta la API Key en el servidor' });
+    return res.status(500).json({ error: 'La API KEY no está configurada en Vercel' });
   }
 
   try {
-    // 3. Hacer la llamada a NVIDIA desde el servidor (donde CORS no existe)
+    const { prompt } = req.body;
+
     const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -30,10 +34,12 @@ export default async function handler(req, res) {
 
     const data = await response.json();
     
-    // 4. Devolver la respuesta de NVIDIA a nuestro frontend de React
-    res.status(200).json(data);
+    if (data.error) {
+        return res.status(500).json({ error: 'Error de NVIDIA: ' + data.error.message });
+    }
+
+    return res.status(200).json(data);
   } catch (error) {
-    console.error("Error en el backend:", error);
-    res.status(500).json({ error: 'Falló la conexión con NVIDIA' });
+    return res.status(500).json({ error: 'Error de conexión: ' + error.message });
   }
 }
