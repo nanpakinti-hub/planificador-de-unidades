@@ -433,6 +433,7 @@ export default function App() {
     const endDate = new Date(selectedYear, selectedMonth, 1);
     let hist: any[] =[];
     let from = 0; const step = 1000;
+    
     while (true) {
       const { data, error } = await supabase.from('historial_viajes').select('unidad, cod_turno, is_tm, tipo_dia').gte('fecha_salida', startDate.toISOString()).lt('fecha_salida', endDate.toISOString()).range(from, from + step - 1);
       if (error) break;
@@ -440,39 +441,45 @@ export default function App() {
       if (data.length < step) break;
       from += step;
     }
+    
     if (hist.length === 0) { alert("No hay historial suficiente."); setIsLoading(false); return; }
 
-    setStatusMsg("Analizando patrones con Mistral AI...");
-    const resumenUnidades: Record<string, any> = {};
+    setStatusMsg("Comprimiendo datos para la IA...");
+    
+    // --- OPTIMIZACIÓN DE TOKENS: Contamos frecuencias en lugar de listar todo ---
+    const resumenComprimido: Record<string, any> = {};
+    
     hist.forEach(t => {
       const key = `${t.is_tm ? 'TM' : 'TT'}_${t.tipo_dia}`;
-      if (!resumenUnidades[t.unidad]) resumenUnidades[t.unidad] = {};
-      if (!resumenUnidades[t.unidad][key]) resumenUnidades[t.unidad][key] =[];
-      resumenUnidades[t.unidad][key].push(t.cod_turno);
+      if (!resumenComprimido[t.unidad]) resumenComprimido[t.unidad] = {};
+      if (!resumenComprimido[t.unidad][key]) resumenComprimido[t.unidad][key] = {};
+      
+      // Contar repeticiones del turno
+      const counts = resumenComprimido[t.unidad][key];
+      counts[t.cod_turno] = (counts[t.cod_turno] || 0) + 1;
     });
 
     const prompt = `
-    Eres un planificador logístico. Analiza este historial de viajes de autobuses. Las llaves son "Franja_TipoDia" (Ej: TM_Semana es Turno Mañana en días hábiles).
-    Deduce un "TOP 3" de turnos lógicos a asignar para el próximo mes para cada unidad y franja ordenados por probabilidad.
-    REGLA ESTRICTA: Devuelve ÚNICAMENTE un JSON válido (sin markdown), estructurado exactamente así:
+    Eres un planificador logístico. Analiza estas FRECUENCIAS de viajes de autobuses de los últimos 2 meses.
+    El formato es { "Unidad": { "Franja_TipoDia": { "CodTurno": VecesRepetido } } }.
+    
+    TAREA: Para cada unidad y franja, deduce el "TOP 3" de turnos con más probabilidad.
+    REGLA: Devuelve ÚNICAMENTE un JSON válido (sin markdown ni texto), así:
     { "L540-001": { "TM_Semana":["5401", "5402", "5403"], "TT_Semana": ["5201"] } }
-    HISTORIAL: ${JSON.stringify(resumenUnidades)}
+    
+    DATOS DE FRECUENCIA:
+    ${JSON.stringify(resumenComprimido)}
     `;
 
     try {
+      setStatusMsg("Analizando patrones con Mistral AI...");
       const response = await fetch("/api/mistral", {
-        method: "POST", 
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt })
       });
-      
-      // Si el servidor responde con error (404, 500, etc)
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || `Error del servidor: ${response.status}`);
-      }
-
       const result = await response.json();
+      
+      if (result.error) throw new Error(result.error);
 
       let aiText = result.choices[0].message.content.trim();
       if (aiText.startsWith("```json")) aiText = aiText.replace(/```json/g, "").replace(/```/g, "");
@@ -481,13 +488,12 @@ export default function App() {
       applyConstraintSolver(patronInteligente, true);
 
     } catch (error: any) {
-      console.error("DETALLE DEL ERROR:", error);
-      // ESTE ALERT NOS DIRÁ EL ERROR REAL
-      alert("FALLO TÉCNICO: " + error.message); 
+      console.error(error); 
+      alert("Error en Mistral AI: " + error.message); 
       setIsLoading(false);
     }
   };
-
+  
   // Callback Memoizado para no redibujar el grid entero
   const updateCell = useCallback(async (unidad: string, fecha: string, is_tm: boolean, newVal: string) => {
     setPlanificacionDB(prev => {
